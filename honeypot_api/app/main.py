@@ -4,10 +4,11 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
-from fastapi import FastAPI, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, Depends, BackgroundTasks, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from typing import List, Dict, Optional
 
 from app.config import settings
 from app.models import (
@@ -45,18 +46,13 @@ async def global_exception_handler(request: Request, exc: Exception):
         exc_info=True
     )
     
-    # Return valid SuccessResponse instead of error
-    response = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="System error occurred. Please try again."
-    )
-    
+    # Return valid SimpleResponse format
     return JSONResponse(
         status_code=200,
-        content=response.model_dump()
+        content={
+            "status": "success",
+            "reply": "I am having some technical trouble. Can we talk in a moment?"
+        }
     )
 
 @app.exception_handler(StarletteHTTPException)
@@ -68,18 +64,13 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         exc_info=True
     )
     
-    # Return valid SuccessResponse instead of error
-    response = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="Request error occurred. Please try again."
-    )
-    
+    # Return valid SimpleResponse format
     return JSONResponse(
         status_code=200,
-        content=response.model_dump()
+        content={
+            "status": "success",
+            "reply": "I'm not sure how to respond to that. Could you clarify?"
+        }
     )
 
 @app.exception_handler(RequestValidationError)
@@ -91,18 +82,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         exc_info=True
     )
     
-    # Return valid SuccessResponse instead of error
-    response = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="Invalid request format. Please check your payload."
-    )
-    
+    # Return valid SimpleResponse format
     return JSONResponse(
         status_code=200,
-        content=response.model_dump()
+        content={
+            "status": "success",
+            "reply": "Something seems wrong with your message format. Can you send it again?"
+        }
     )
 
 @app.exception_handler(json.JSONDecodeError)
@@ -114,18 +100,13 @@ async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError)
         exc_info=True
     )
     
-    # Return valid SuccessResponse instead of error
-    response = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="Invalid JSON format. Please send valid JSON."
-    )
-    
+    # Return valid SimpleResponse format
     return JSONResponse(
         status_code=200,
-        content=response.model_dump()
+        content={
+            "status": "success",
+            "reply": "I couldn't read that message. Please try sending it again."
+        }
     )
 
 # ============================================================================
@@ -156,40 +137,34 @@ async def debug_echo(request: Request):
         "headers": dict(request.headers)
     }
 
-@app.get("/api/honeypot", response_model=SuccessResponse)
+@app.get("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_get():
     """
     GET handler for /api/honeypot.
-    Returns HTTP 200 with SuccessResponse to prevent 405 errors.
-    Used by browsers and testers that probe with GET before POST.
+    Returns HTTP 200 with SimpleResponse to prevent 405 errors.
     """
-    return build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_notes="Use POST with JSON body."
+    return SimpleResponse(
+        status="success",
+        reply="Use POST with a JSON body to talk to me."
     )
 
-@app.options("/api/honeypot")
+@app.options("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_options():
     """
     OPTIONS handler for /api/honeypot.
     Returns HTTP 200 for CORS preflight and tester probes.
     """
-    return build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_notes="Use POST with JSON body."
+    return SimpleResponse(
+        status="success",
+        reply="Use POST with a JSON body to talk to me."
     )
 
 
 @app.post("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_endpoint(
     request: Request,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    x_api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
     """
     GUVI-COMPATIBLE: Returns simple {status, reply} format.
@@ -225,15 +200,13 @@ async def honeypot_endpoint(
     # ====================================================================
     # AUTH CHECK (non-blocking, manual)
     # ====================================================================
-    api_key = request.headers.get("x-api-key")
+    # Use the header value from Parameter if available, otherwise fallback to manual header check
+    api_key = x_api_key or request.headers.get("x-api-key")
     if not api_key or api_key != settings.HONEYPOT_API_KEY:
         logger.warning(f"[{request_id}] Auth failed - returning fallback response")
-        return build_success_response(
-            scam_detected=False,
-            engagement_duration=0,
-            total_messages=0,
-            extracted_intel=None,
-            agent_reply="Missing API key."
+        return SimpleResponse(
+            status="success",
+            reply="Authentication failed. Please check your API key."
         )
     
     try:
