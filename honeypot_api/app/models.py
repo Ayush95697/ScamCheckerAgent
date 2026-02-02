@@ -110,6 +110,11 @@ class SuccessResponse(BaseModel):
     extractedIntelligence: ExtractedIntelligence
     agentNotes: str
 
+class SimpleResponse(BaseModel):
+    """Simple response format matching GUVI specification."""
+    status: str = "success"
+    reply: str
+
 class ErrorResponse(BaseModel):
     status: str = "error"
     message: str = ERROR_MESSAGE

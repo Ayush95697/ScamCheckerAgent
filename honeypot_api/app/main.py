@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.models import (
-    RequestPayload, SuccessResponse, Message, Sender
+    RequestPayload, SuccessResponse, SimpleResponse, Message, Sender
 )
 from app.auth import verify_api_key
 from app.store import store
@@ -186,15 +186,16 @@ async def honeypot_options():
     )
 
 
-@app.post("/api/honeypot", response_model=SuccessResponse)
+@app.post("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_endpoint(
     request: Request,
     background_tasks: BackgroundTasks
 ):
     """
-    ULTRA-HARDENED: Accepts ANY request body (even empty or malformed).
+    GUVI-COMPATIBLE: Returns simple {status, reply} format.
+    Accepts ANY request body (even empty or malformed).
     Manually parses JSON and normalizes payload.
-    NEVER rejects before handler runs - guaranteed HTTP 200 with SuccessResponse.
+    NEVER rejects before handler runs - guaranteed HTTP 200 with SimpleResponse.
     """
     request_id = get_request_id()
     
@@ -505,21 +506,19 @@ async def honeypot_endpoint(
                 background_tasks.add_task(background_callback_wrapper)
 
         # ====================================================================
-        # SAVE SESSION & BUILD RESPONSE
+        # SAVE SESSION & BUILD RESPONSE (GUVI FORMAT)
         # ====================================================================
         store.save_session(session_id, session)
 
         # Calculate duration
         duration = calculate_engagement_duration(session["started_at"])
 
-        # Build response using centralized builder
-        return build_success_response(
-            scam_detected=session["scamDetected"],
-            engagement_duration=duration,
-            total_messages=session["totalMessagesExchanged"],
-            extracted_intel=session["extractedIntelligence"],
-            agent_notes=session.get("agentNotes", ""),
-            agent_reply=agent_reply_text if session["scamDetected"] else ""
+        # Build GUVI-compatible response: {status, reply}
+        reply_text = agent_reply_text if agent_reply_text else ""
+        
+        return SimpleResponse(
+            status="success",
+            reply=reply_text
         )
     
     except Exception as e:
@@ -529,10 +528,7 @@ async def honeypot_endpoint(
         logger.exception(f"[{request_id}] CRITICAL ERROR in honeypot_endpoint: {e}")
         
         # Return safe fallback response matching GUVI schema
-        return build_success_response(
-            scam_detected=False,
-            engagement_duration=0,
-            total_messages=0,
-            extracted_intel=None,
-            agent_reply=agent._fallback_reply()
+        return SimpleResponse(
+            status="success",
+            reply=agent._fallback_reply()
         )
