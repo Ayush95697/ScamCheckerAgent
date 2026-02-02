@@ -2,6 +2,11 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from app.models import ExtractedIntelligence, CallbackPayload, EngagementMetrics
 
+def cap_list(items: List[str], max_size: int) -> List[str]:
+    """Cap list size and deduplicate while preserving order."""
+    unique_items = list(dict.fromkeys(items))  # Preserve order while deduplicating
+    return unique_items[:max_size]
+
 def calculate_engagement_duration(started_at: Any) -> int:
     if isinstance(started_at, str):
         try:

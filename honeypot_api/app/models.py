@@ -1,38 +1,96 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Any
-from pydantic import BaseModel, Field
+from typing import List, Optional, Any, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
+import uuid
 
 # Constants for consistent error handling
 ERROR_MESSAGE = "Invalid API key or malformed request"
-
-class Channel(str, Enum):
-    SMS = "SMS"
-    WHATSAPP = "WhatsApp"
-    EMAIL = "Email"
-    CHAT = "Chat"
 
 class Sender(str, Enum):
     SCAMMER = "scammer"
     USER = "user"
 
 class Message(BaseModel):
-    # This represents both user and scammer messages
-    sender: Sender
-    text: str = Field(..., min_length=1)
-    timestamp: datetime
+    """Lenient message model - accepts flexible inputs."""
+    sender: Union[Sender, str] = "scammer"
+    text: str = ""  # Allow empty strings, no min_length
+    timestamp: Optional[Union[str, datetime]] = None
+    
+    @field_validator('sender', mode='before')
+    @classmethod
+    def coerce_sender(cls, v):
+        """Coerce sender to valid enum value."""
+        if isinstance(v, str):
+            v_lower = v.lower()
+            if v_lower in ["scammer", "user"]:
+                return v_lower
+        return "scammer"  # Default fallback
+    
+    @field_validator('timestamp', mode='before')
+    @classmethod
+    def coerce_timestamp(cls, v):
+        """Accept string, datetime, or None."""
+        if v is None:
+            return datetime.now()
+        if isinstance(v, str):
+            try:
+                return datetime.fromisoformat(v.replace('Z', '+00:00'))
+            except:
+                return datetime.now()
+        if isinstance(v, datetime):
+            return v
+        return datetime.now()
 
 class Metadata(BaseModel):
-    channel: Channel
-    language: str
-    locale: str
+    """Lenient metadata - accepts any strings, no enum validation."""
+    channel: str = "SMS"  # Changed from Enum to str
+    language: str = "en"
+    locale: str = "IN"
 
 class RequestPayload(BaseModel):
-    sessionId: str = Field(..., min_length=1)
-    message: Message
-    # Make conversationHistory OPTIONAL as per spec update
-    conversationHistory: List[Message] = Field(default_factory=list)
-    metadata: Metadata
+    """Lenient request payload - all fields optional or have defaults."""
+    sessionId: Optional[str] = None
+    message: Optional[Message] = None
+    conversationHistory: Optional[List[Any]] = None  # Accept any type, normalize later
+    metadata: Optional[Metadata] = None
+    
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_payload(cls, data):
+        """Normalize and provide defaults for all fields."""
+        if not isinstance(data, dict):
+            data = {}
+        
+        # Generate sessionId if missing
+        if not data.get('sessionId'):
+            data['sessionId'] = f"session-{uuid.uuid4()}"
+        
+        # Ensure message exists
+        if not data.get('message'):
+            data['message'] = {
+                "sender": "scammer",
+                "text": "",
+                "timestamp": datetime.now()
+            }
+        
+        # Normalize conversationHistory to list
+        history = data.get('conversationHistory')
+        if history is None or not isinstance(history, list):
+            data['conversationHistory'] = []
+        else:
+            # Cap at 30 messages
+            data['conversationHistory'] = history[:30]
+        
+        # Ensure metadata exists
+        if not data.get('metadata'):
+            data['metadata'] = {
+                "channel": "SMS",
+                "language": "en",
+                "locale": "IN"
+            }
+        
+        return data
 
 class EngagementMetrics(BaseModel):
     engagementDurationSeconds: int

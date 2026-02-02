@@ -88,8 +88,15 @@ class InMemorySessionStore(SessionStore):
                 seen.add(key)
                 combined.append(m)
                 
-        # Sort by timestamp
-        combined.sort(key=lambda x: x.timestamp)
+        # Sort by timestamp (normalize to timezone-naive to avoid comparison errors)
+        def get_timestamp_naive(msg):
+            ts = msg.timestamp
+            # Convert to naive datetime if timezone-aware
+            if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                return ts.replace(tzinfo=None)
+            return ts
+        
+        combined.sort(key=get_timestamp_naive)
         return combined
 
 # DISABLED: RedisSessionStore completely removed for hackathon stability
