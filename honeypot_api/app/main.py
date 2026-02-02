@@ -1,8 +1,8 @@
 import asyncio
 import logging
 import json
-from datetime import datetime, timedelta
-from typing import List, Dict
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Optional, Any, Union
 
 from fastapi import FastAPI, Depends, BackgroundTasks, Request, Header, Body, Security
 from fastapi.responses import JSONResponse
@@ -13,7 +13,7 @@ from typing import List, Dict, Optional, Any
 
 from app.config import settings
 from app.models import (
-    RequestPayload, SimpleResponse, Message, Sender
+    RequestPayload, SuccessResponse, SimpleResponse, Message, Sender
 )
 from app.store import store
 from app.scam_detection import detector
@@ -24,7 +24,7 @@ from app.utils import (
     check_completion, calculate_engagement_duration, 
     build_callback_payload, is_intel_found
 )
-from app.response_builder import safe_agent_reply
+from app.response_builder import build_success_response, safe_agent_reply
 from app.middleware import RequestIDMiddleware, get_request_id
 
 # Configure logging
@@ -56,13 +56,18 @@ async def global_exception_handler(request: Request, exc: Exception):
         exc_info=True
     )
     
-    # Return valid SimpleResponse format
+    # Return valid SuccessResponse format
+    response = build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="I am having some technical trouble. Can we talk in a moment?"
+    )
+    
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "reply": "I am having some technical trouble. Can we talk in a moment?"
-        }
+        content=response.model_dump()
     )
 
 @app.exception_handler(StarletteHTTPException)
@@ -74,13 +79,18 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         exc_info=True
     )
     
-    # Return valid SimpleResponse format
+    # Return valid SuccessResponse format
+    response = build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="I'm not sure how to respond to that. Could you clarify?"
+    )
+    
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "reply": "I'm not sure how to respond to that. Could you clarify?"
-        }
+        content=response.model_dump()
     )
 
 @app.exception_handler(RequestValidationError)
@@ -92,13 +102,18 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         exc_info=True
     )
     
-    # Return valid SimpleResponse format
+    # Return valid SuccessResponse format
+    response = build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="Something seems wrong with your message format. Can you send it again?"
+    )
+    
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "reply": "Something seems wrong with your message format. Can you send it again?"
-        }
+        content=response.model_dump()
     )
 
 @app.exception_handler(json.JSONDecodeError)
@@ -110,13 +125,18 @@ async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError)
         exc_info=True
     )
     
-    # Return valid SimpleResponse format
+    # Return valid SuccessResponse format
+    response = build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="I couldn't read that message. Please try sending it again."
+    )
+    
     return JSONResponse(
         status_code=200,
-        content={
-            "status": "success",
-            "reply": "I couldn't read that message. Please try sending it again."
-        }
+        content=response.model_dump()
     )
 
 # ============================================================================
@@ -147,29 +167,41 @@ async def debug_echo(request: Request):
         "headers": dict(request.headers)
     }
 
-@app.get("/api/honeypot", response_model=SimpleResponse)
+@app.get("/api/honeypot", response_model=SuccessResponse)
 async def honeypot_get():
-    """Returns HTTP 200 SimpleResponse for probes."""
-    return SimpleResponse(status="success", reply="Please use POST with JSON body.")
+    """Returns HTTP 200 SuccessResponse for probes."""
+    return build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="Please use POST with JSON body."
+    )
 
-@app.options("/api/honeypot", response_model=SimpleResponse)
+@app.options("/api/honeypot", response_model=SuccessResponse)
 async def honeypot_options():
-    """Returns HTTP 200 SimpleResponse for pre-flight."""
-    return SimpleResponse(status="success", reply="Please use POST with JSON body.")
+    """Returns HTTP 200 SuccessResponse for pre-flight."""
+    return build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_reply="Please use POST with JSON body."
+    )
 
 
-@app.post("/api/honeypot", response_model=SimpleResponse)
+@app.post("/api/honeypot", response_model=SuccessResponse)
 async def honeypot_endpoint(
     request: Request,
     background_tasks: BackgroundTasks,
-    payload: RequestPayload = Body(..., description="Message payload"),
     x_api_key: str = Security(api_key_header)
 ):
     """
-    GUVI-COMPATIBLE: Returns simple {status, reply} format.
+    CRITICAL HARDENING: No Pydantic Body validation.
+    Returns FULL SuccessResponse format for GUVI evaluation.
     Accepts ANY request body (even empty or malformed).
     Manually parses JSON and normalizes payload.
-    NEVER rejects before handler runs - guaranteed HTTP 200 with SimpleResponse.
+    NEVER rejects before handler runs - guaranteed HTTP 200.
     """
     request_id = get_request_id()
     
@@ -203,9 +235,12 @@ async def honeypot_endpoint(
     api_key = x_api_key or request.headers.get("x-api-key")
     if not api_key or api_key != settings.HONEYPOT_API_KEY:
         logger.warning(f"[{request_id}] Auth failed - returning fallback response")
-        return SimpleResponse(
-            status="success",
-            reply="Authentication failed. Please check your API key."
+        return build_success_response(
+            scam_detected=False,
+            engagement_duration=0,
+            total_messages=0,
+            extracted_intel=None,
+            agent_reply="Authentication failed. Please check your API key."
         )
     
     try:
@@ -226,14 +261,21 @@ async def honeypot_endpoint(
         
         incoming_text = str(message_data.get('text', ''))[:4000]  # Cap at 4000 chars
         
-        # Extract timestamp (use now if missing/invalid)
+        # Extract timestamp with robust epoch ms support
         message_timestamp = message_data.get('timestamp')
         try:
-            if isinstance(message_timestamp, str):
+            if isinstance(message_timestamp, (int, float)):
+                # Handle epoch ms (e.g. 1738521054000)
+                if message_timestamp > 10000000000:  # Likely ms
+                    message_timestamp = datetime.fromtimestamp(message_timestamp / 1000.0, tz=timezone.utc)
+                else:  # Likely seconds
+                    message_timestamp = datetime.fromtimestamp(message_timestamp, tz=timezone.utc)
+            elif isinstance(message_timestamp, str):
                 message_timestamp = datetime.fromisoformat(message_timestamp.replace('Z', '+00:00'))
             elif not isinstance(message_timestamp, datetime):
                 message_timestamp = now
-        except:
+        except Exception as e:
+            logger.warning(f"[{request_id}] Timestamp normalization failed: {e}")
             message_timestamp = now
         
         # Extract and normalize conversationHistory
@@ -485,12 +527,14 @@ async def honeypot_endpoint(
         # Calculate duration
         duration = calculate_engagement_duration(session["started_at"])
 
-        # Build GUVI-compatible response: {status, reply}
-        reply_text = agent_reply_text if agent_reply_text else ""
-        
-        return SimpleResponse(
-            status="success",
-            reply=reply_text
+        # Build FULL SuccessResponse for GUVI evaluation
+        return build_success_response(
+            scam_detected=session["scamDetected"],
+            engagement_duration=duration,
+            total_messages=session["totalMessagesExchanged"],
+            extracted_intel=session["extractedIntelligence"],
+            agent_notes="", # Will be set from agent_reply by build_success_response
+            agent_reply=agent_reply_text
         )
     
     except Exception as e:
@@ -500,7 +544,10 @@ async def honeypot_endpoint(
         logger.exception(f"[{request_id}] CRITICAL ERROR in honeypot_endpoint: {e}")
         
         # Return safe fallback response matching GUVI schema
-        return SimpleResponse(
-            status="success",
-            reply=agent._fallback_reply()
+        return build_success_response(
+            scam_detected=False,
+            engagement_duration=0,
+            total_messages=0,
+            extracted_intel=None,
+            agent_reply=agent._fallback_reply()
         )
