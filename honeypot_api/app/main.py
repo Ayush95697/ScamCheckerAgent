@@ -152,9 +152,39 @@ async def debug_echo(request: Request):
     return {
         "content_type": request.headers.get("content-type", "missing"),
         "raw_len": len(raw_str),
-        "raw_preview": raw_str[:200] if raw_str else "empty",
+        "raw_preview": raw_str[:200] if raw_str else "aempty",
         "headers": dict(request.headers)
     }
+
+@app.get("/api/honeypot", response_model=SuccessResponse)
+async def honeypot_get():
+    """
+    GET handler for /api/honeypot.
+    Returns HTTP 200 with SuccessResponse to prevent 405 errors.
+    Used by browsers and testers that probe with GET before POST.
+    """
+    return build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_notes="Use POST with JSON body."
+    )
+
+@app.options("/api/honeypot")
+async def honeypot_options():
+    """
+    OPTIONS handler for /api/honeypot.
+    Returns HTTP 200 for CORS preflight and tester probes.
+    """
+    return build_success_response(
+        scam_detected=False,
+        engagement_duration=0,
+        total_messages=0,
+        extracted_intel=None,
+        agent_notes="Use POST with JSON body."
+    )
+
 
 @app.post("/api/honeypot", response_model=SuccessResponse)
 async def honeypot_endpoint(
