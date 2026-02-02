@@ -137,69 +137,141 @@ def root():
     """Health check endpoint for hackathon evaluation."""
     return {"status": "ok", "service": "honeypot", "endpoint": "/api/honeypot"}
 
+@app.post("/__debug_echo")
+async def debug_echo(request: Request):
+    """
+    Debug endpoint to inspect what GUVI tester sends.
+    Returns raw request details without validation.
+    """
+    try:
+        raw = await request.body()
+        raw_str = raw.decode('utf-8') if raw else ""
+    except:
+        raw_str = ""
+    
+    return {
+        "content_type": request.headers.get("content-type", "missing"),
+        "raw_len": len(raw_str),
+        "raw_preview": raw_str[:200] if raw_str else "empty",
+        "headers": dict(request.headers)
+    }
+
 @app.post("/api/honeypot", response_model=SuccessResponse)
 async def honeypot_endpoint(
     request: Request,
-    payload: RequestPayload,
-    background_tasks: BackgroundTasks,
-    api_key: str = Depends(verify_api_key)
+    background_tasks: BackgroundTasks
 ):
     """
-    HARDENED: Guaranteed to return HTTP 200 with valid SuccessResponse.
-    Never returns 401/422/400/500 - all errors return success schema with fallback data.
+    ULTRA-HARDENED: Accepts ANY request body (even empty or malformed).
+    Manually parses JSON and normalizes payload.
+    NEVER rejects before handler runs - guaranteed HTTP 200 with SuccessResponse.
     """
     request_id = get_request_id()
     
+    # ====================================================================
+    # MANUAL BODY PARSING - BYPASS PYDANTIC VALIDATION
+    # ====================================================================
+    try:
+        raw_body = await request.body()
+        if raw_body:
+            payload_dict = json.loads(raw_body)
+        else:
+            payload_dict = {}
+    except json.JSONDecodeError as e:
+        logger.warning(f"[{request_id}] JSON decode error: {e}")
+        payload_dict = {}
+    except Exception as e:
+        logger.warning(f"[{request_id}] Body parsing error: {e}")
+        payload_dict = {}
+    
+    # Ensure payload is a dict
+    if not isinstance(payload_dict, dict):
+        logger.warning(f"[{request_id}] Payload is not dict, got {type(payload_dict)}")
+        payload_dict = {}
+    
+    logger.info(f"[{request_id}] Parsed payload keys: {list(payload_dict.keys())}")
+    
+    # ====================================================================
+    # AUTH CHECK (non-blocking, manual)
+    # ====================================================================
+    api_key = request.headers.get("x-api-key")
+    if not api_key or api_key != settings.HONEYPOT_API_KEY:
+        logger.warning(f"[{request_id}] Auth failed - returning fallback response")
+        return build_success_response(
+            scam_detected=False,
+            engagement_duration=0,
+            total_messages=0,
+            extracted_intel=None,
+            agent_reply="Missing API key."
+        )
+    
     try:
         # ====================================================================
-        # AUTH CHECK (non-blocking)
+        # MANUAL PAYLOAD NORMALIZATION
         # ====================================================================
-        if api_key is None:
-            logger.warning(f"[{request_id}] Auth failed - returning fallback response")
-            return build_success_response(
-                scam_detected=False,
-                engagement_duration=0,
-                total_messages=0,
-                extracted_intel=None,
-                agent_reply="Missing API key."
-            )
-        
-        # ====================================================================
-        # INPUT VALIDATION & CAPS
-        # ====================================================================
-        session_id = payload.sessionId or f"session-{request_id[:8]}"
         now = datetime.now()
         
-        # Cap message text to 4000 chars
-        incoming_text = (payload.message.text or "")[:4000]
+        # Extract and normalize sessionId
+        session_id = payload_dict.get('sessionId')
+        if not session_id or not isinstance(session_id, str):
+            session_id = f"session-{request_id[:8]}"
         
-        # Cap conversationHistory to 30 messages, each text to 1000 chars
-        conversation_history = payload.conversationHistory or []
-        if len(conversation_history) > 30:
-            conversation_history = conversation_history[:30]
+        # Extract and normalize message
+        message_data = payload_dict.get('message', {})
+        if not isinstance(message_data, dict):
+            message_data = {}
+        
+        incoming_text = str(message_data.get('text', ''))[:4000]  # Cap at 4000 chars
+        
+        # Extract timestamp (use now if missing/invalid)
+        message_timestamp = message_data.get('timestamp')
+        try:
+            if isinstance(message_timestamp, str):
+                message_timestamp = datetime.fromisoformat(message_timestamp.replace('Z', '+00:00'))
+            elif not isinstance(message_timestamp, datetime):
+                message_timestamp = now
+        except:
+            message_timestamp = now
+        
+        # Extract and normalize conversationHistory
+        conversation_history_raw = payload_dict.get('conversationHistory', [])
+        if not isinstance(conversation_history_raw, list):
+            conversation_history_raw = []
+        
+        # Cap at 30 messages
+        conversation_history_raw = conversation_history_raw[:30]
         
         # Normalize conversation history messages
         normalized_history = []
-        for msg in conversation_history:
+        for msg in conversation_history_raw:
             try:
-                if isinstance(msg, Message):
-                    # Cap text length
-                    if len(msg.text) > 1000:
-                        msg.text = msg.text[:1000]
-                    normalized_history.append(msg)
-                elif isinstance(msg, dict):
-                    # Convert dict to Message
+                if isinstance(msg, dict):
+                    # Extract fields with defaults
                     text = str(msg.get('text', ''))[:1000]
                     sender = msg.get('sender', 'scammer')
                     timestamp = msg.get('timestamp', now)
+                    
+                    # Normalize timestamp
+                    if isinstance(timestamp, str):
+                        try:
+                            timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                        except:
+                            timestamp = now
+                    
+                    # Coerce sender to valid value
+                    if sender not in ['scammer', 'user']:
+                        sender = 'scammer'
+                    
                     normalized_history.append(Message(
-                        sender=sender,
+                        sender=Sender(sender),
                         text=text,
                         timestamp=timestamp
                     ))
             except Exception as e:
                 logger.warning(f"[{request_id}] Failed to normalize history message: {e}")
                 continue
+        
+        logger.info(f"[{request_id}] Normalized: sessionId={session_id}, text_len={len(incoming_text)}, history_len={len(normalized_history)}")
         
         # ====================================================================
         # SESSION MANAGEMENT
@@ -236,7 +308,7 @@ async def honeypot_endpoint(
         in_msg = {
             "sender": "scammer",
             "text": incoming_text,
-            "timestamp": (payload.message.timestamp or now).isoformat()
+            "timestamp": message_timestamp.isoformat()
         }
         session["internalHistory"].append(in_msg)
         session["totalMessagesExchanged"] += 1
