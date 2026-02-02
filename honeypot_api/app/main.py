@@ -4,31 +4,41 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
-from fastapi import FastAPI, Depends, BackgroundTasks, Request, Header
+from fastapi import FastAPI, Depends, BackgroundTasks, Request, Header, Body, Security
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from typing import List, Dict, Optional
+from fastapi.security import APIKeyHeader
+from typing import List, Dict, Optional, Any
 
 from app.config import settings
 from app.models import (
-    RequestPayload, SuccessResponse, SimpleResponse, Message, Sender
+    RequestPayload, SimpleResponse, Message, Sender
 )
-from app.auth import verify_api_key
 from app.store import store
 from app.scam_detection import detector
 from app.extraction import extractor
 from app.agent import agent
 from app.callback import send_final_result_callback
-from app.utils import check_completion, calculate_engagement_duration, build_callback_payload, is_intel_found
-from app.response_builder import build_success_response, safe_agent_reply
+from app.utils import (
+    check_completion, calculate_engagement_duration, 
+    build_callback_payload, is_intel_found
+)
+from app.response_builder import safe_agent_reply
 from app.middleware import RequestIDMiddleware, get_request_id
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("honeypot-api")
 
-app = FastAPI(title="Agentic Honeypot API", version="0.1.0")
+# Define API Key security for Swagger
+api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+
+app = FastAPI(
+    title="Agentic Honeypot API",
+    version="0.1.0",
+    description="Agentic Honey-Pot for Scam Detection & Intelligence Extraction"
+)
 
 # Add request ID middleware
 app.add_middleware(RequestIDMiddleware)
@@ -139,32 +149,21 @@ async def debug_echo(request: Request):
 
 @app.get("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_get():
-    """
-    GET handler for /api/honeypot.
-    Returns HTTP 200 with SimpleResponse to prevent 405 errors.
-    """
-    return SimpleResponse(
-        status="success",
-        reply="Use POST with a JSON body to talk to me."
-    )
+    """Returns HTTP 200 SimpleResponse for probes."""
+    return SimpleResponse(status="success", reply="Please use POST with JSON body.")
 
 @app.options("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_options():
-    """
-    OPTIONS handler for /api/honeypot.
-    Returns HTTP 200 for CORS preflight and tester probes.
-    """
-    return SimpleResponse(
-        status="success",
-        reply="Use POST with a JSON body to talk to me."
-    )
+    """Returns HTTP 200 SimpleResponse for pre-flight."""
+    return SimpleResponse(status="success", reply="Please use POST with JSON body.")
 
 
 @app.post("/api/honeypot", response_model=SimpleResponse)
 async def honeypot_endpoint(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_api_key: Optional[str] = Header(None, alias="x-api-key")
+    payload: RequestPayload = Body(..., description="Message payload"),
+    x_api_key: str = Security(api_key_header)
 ):
     """
     GUVI-COMPATIBLE: Returns simple {status, reply} format.
@@ -200,7 +199,7 @@ async def honeypot_endpoint(
     # ====================================================================
     # AUTH CHECK (non-blocking, manual)
     # ====================================================================
-    # Use the header value from Parameter if available, otherwise fallback to manual header check
+    # Auth check - priority to the Security dependency, fallback to manual header
     api_key = x_api_key or request.headers.get("x-api-key")
     if not api_key or api_key != settings.HONEYPOT_API_KEY:
         logger.warning(f"[{request_id}] Auth failed - returning fallback response")
