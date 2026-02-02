@@ -376,3 +376,124 @@ async def _handle_honeypot(
             )
             if is_scam:
                 session["scamDetected"] = True
+                logger.info(f"[{rid}] Scam detected (conf={confidence})")
+        except Exception as e:
+            logger.error(f"[{rid}] Scam detection failed: {e}", exc_info=True)
+
+    # -------------------------
+    # Agent reply
+    # -------------------------
+    agent_reply_text = ""
+    if session.get("scamDetected", False):
+        try:
+            scammer_msgs = len([m for m in combined_history if m.sender == Sender.SCAMMER])
+            agent_msgs = len([m for m in combined_history if m.sender == Sender.USER])
+            logical_turns = min(scammer_msgs, agent_msgs + 1)
+
+            agent_reply_text = await safe_agent_reply(
+                current_message=incoming_text,
+                merged_history=combined_history,
+                intel_so_far=current_intel,
+                turn_index=logical_turns,
+                timeout_seconds=8.0,
+            )
+        except Exception:
+            agent_reply_text = agent._fallback_reply()
+
+        session["internalHistory"].append(
+            {"sender": "user", "text": agent_reply_text, "timestamp": datetime.now(timezone.utc).isoformat()}
+        )
+        session["totalMessagesExchanged"] += 1
+        session["last_agent_reply"] = agent_reply_text
+
+        # STRICT formatting requirement
+        session["agentNotes"] = f"nextReply: {agent_reply_text}"
+
+    # -------------------------
+    # Callback scheduling (final result)
+    # -------------------------
+    can_retry = True
+    if session.get("next_retry_at"):
+        try:
+            next_retry = datetime.fromisoformat(session["next_retry_at"])
+            if next_retry.tzinfo is None:
+                next_retry = next_retry.replace(tzinfo=timezone.utc)
+            if now < next_retry:
+                can_retry = False
+        except Exception:
+            pass
+
+    if (
+        session.get("scamDetected", False)
+        and not session.get("callback_sent", False)
+        and not session.get("callback_in_progress", False)
+        and can_retry
+    ):
+        if check_completion(session, combined_history):
+            session["callback_in_progress"] = True
+            store.save_session(session_id, session)
+
+            callback_payload = build_callback_payload(session_id, session)
+
+            async def background_callback_wrapper():
+                try:
+                    success, code, msg = await send_final_result_callback(callback_payload)
+                    s = store.get_session(session_id) or session
+                    s["callback_in_progress"] = False
+                    if success:
+                        s["callback_sent"] = True
+                    else:
+                        s["callback_attempts"] = s.get("callback_attempts", 0) + 1
+                        if s["callback_attempts"] >= 3:
+                            s["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+                    store.save_session(session_id, s)
+                except Exception as e:
+                    logger.error(f"[{rid}] Callback failed: {e}", exc_info=True)
+                    s = store.get_session(session_id) or session
+                    s["callback_in_progress"] = False
+                    store.save_session(session_id, s)
+
+            background_tasks.add_task(background_callback_wrapper)
+
+    # save session
+    store.save_session(session_id, session)
+
+    # -------------------------
+    # Build final response (full SuccessResponse schema)
+    # -------------------------
+    duration = calculate_engagement_duration(session["started_at"])
+    resp = build_success_response(
+        scam_detected=bool(session.get("scamDetected", False)),
+        engagement_duration=int(duration),
+        total_messages=int(session.get("totalMessagesExchanged", 0)),
+        extracted_intel=session.get("extractedIntelligence", None),
+        agent_notes=session.get("agentNotes", ""),  # must start with nextReply:
+        agent_reply=agent_reply_text,
+    )
+    return JSONResponse(status_code=200, content=resp.model_dump())
+
+
+# -----------------------------------------------------------------------------
+# POST entrypoints (covers GUVI tester variations)
+# -----------------------------------------------------------------------------
+@app.post("/api/honeypot")
+@app.post("/api/honeypot/")
+@app.post("/")
+async def honeypot_entry(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_api_key: Optional[str] = Security(api_key_header),
+):
+    try:
+        return await _handle_honeypot(request, background_tasks, x_api_key)
+    except Exception as e:
+        rid = get_request_id()
+        logger.exception(f"[{rid}] CRITICAL honeypot_entry error: {e}")
+        resp = build_success_response(
+            scam_detected=False,
+            engagement_duration=0,
+            total_messages=0,
+            extracted_intel=None,
+            agent_reply=agent._fallback_reply(),
+        )
+        return JSONResponse(status_code=200, content=resp.model_dump())
