@@ -1,5 +1,5 @@
 import json
-import redis
+# import redis  # DISABLED: Redis completely removed for hackathon stability
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from app.config import settings
@@ -92,78 +92,18 @@ class InMemorySessionStore(SessionStore):
         combined.sort(key=lambda x: x.timestamp)
         return combined
 
-class RedisSessionStore(SessionStore):
-    def __init__(self, redis_url: str):
-        self._redis = redis.from_url(redis_url, decode_responses=True)
-
-    def get_session(self, session_id: str) -> Dict[str, Any]:
-        data = self._redis.get(f"session:{session_id}")
-        return json.loads(data) if data else {}
-
-    def save_session(self, session_id: str, data: Dict[str, Any]):
-        # Serialize datetime objects
-        data_copy = data.copy()
-        if 'started_at' in data_copy and isinstance(data_copy['started_at'], datetime):
-            data_copy['started_at'] = data_copy['started_at'].isoformat()
-        
-        self._redis.set(f"session:{session_id}", json.dumps(data_copy))
-
-    def append_internal_message(self, session_id: str, sender: str, text: str, timestamp: str):
-        session = self.get_session(session_id)
-        if not session:
-            # Need initialized session
-            return
-        
-        internal = session.get("internalHistory", [])
-        new_msg = {"sender": sender, "text": text, "timestamp": timestamp}
-        internal.append(new_msg)
-        session["internalHistory"] = internal
-        self.save_session(session_id, session)
-
-    def get_combined_history(self, session_id: str, platform_history: List[Message]) -> List[Message]:
-        session = self.get_session(session_id)
-        internal = session.get("internalHistory", [])
-        
-        internal_msgs = []
-        for m in internal:
-            try:
-                sender = Sender(m["sender"])
-                ts = datetime.fromisoformat(m["timestamp"]) if isinstance(m["timestamp"], str) else m["timestamp"]
-                internal_msgs.append(Message(sender=sender, text=m["text"], timestamp=ts))
-            except:
-                continue
-
-        combined = []
-        seen = set()
-        
-        def get_key(msg: Message):
-            s_str = msg.sender.value if isinstance(msg.sender, Sender) else str(msg.sender)
-            text_norm = msg.text.strip().lower()
-            ts_iso = msg.timestamp.isoformat()
-            return (s_str, text_norm, ts_iso)
-        
-        for m in platform_history:
-            key = get_key(m)
-            if key not in seen:
-                seen.add(key)
-                combined.append(m)
-        
-        for m in internal_msgs:
-            key = get_key(m)
-            if key not in seen:
-                seen.add(key)
-                combined.append(m)
-                
-        combined.sort(key=lambda x: x.timestamp)
-        return combined
+# DISABLED: RedisSessionStore completely removed for hackathon stability
+# class RedisSessionStore(SessionStore):
+#     def __init__(self, redis_url: str):
+#         self._redis = redis.from_url(redis_url, decode_responses=True)
+#     ...
 
 def get_store() -> SessionStore:
-    if settings.REDIS_URL:
-        try:
-            return RedisSessionStore(settings.REDIS_URL)
-        except Exception:
-            print("Warning: Redis connection failed, falling back to in-memory store")
-            return InMemorySessionStore()
+    """
+    HARDENED: Always return InMemorySessionStore regardless of REDIS_URL.
+    Redis is completely disabled for hackathon stability.
+    """
+    # Force in-memory store - no Redis dependency
     return InMemorySessionStore()
 
 store = get_store()
