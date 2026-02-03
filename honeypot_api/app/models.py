@@ -92,32 +92,12 @@ class RequestPayload(BaseModel):
         
         return data
 
-class EngagementMetrics(BaseModel):
-    engagementDurationSeconds: int
-    totalMessagesExchanged: int
-
 class ExtractedIntelligence(BaseModel):
     bankAccounts: List[str] = Field(default_factory=list)
     upiIds: List[str] = Field(default_factory=list)
     phishingLinks: List[str] = Field(default_factory=list)
     phoneNumbers: List[str] = Field(default_factory=list)
     suspiciousKeywords: List[str] = Field(default_factory=list)
-
-class SuccessResponse(BaseModel):
-    status: str = "success"
-    scamDetected: bool
-    engagementMetrics: EngagementMetrics
-    extractedIntelligence: ExtractedIntelligence
-    agentNotes: str
-
-class SimpleResponse(BaseModel):
-    """Simple response format matching GUVI specification."""
-    status: str = "success"
-    reply: str
-
-class ErrorResponse(BaseModel):
-    status: str = "error"
-    message: str = ERROR_MESSAGE
 
 class CallbackPayload(BaseModel):
     sessionId: str

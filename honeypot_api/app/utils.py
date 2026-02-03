@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from app.models import ExtractedIntelligence, CallbackPayload, EngagementMetrics
+from app.models import ExtractedIntelligence, CallbackPayload
 
 def cap_list(items: List[str], max_size: int) -> List[str]:
     """Cap list size and deduplicate while preserving order."""

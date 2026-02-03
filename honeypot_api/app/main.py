@@ -21,9 +21,7 @@ from app.utils import (
     check_completion,
     calculate_engagement_duration,
     build_callback_payload,
-    is_intel_found,
 )
-from app.response_builder import build_success_response, safe_agent_reply
 from app.middleware import RequestIDMiddleware, get_request_id
 
 # -----------------------------------------------------------------------------
@@ -32,7 +30,7 @@ from app.middleware import RequestIDMiddleware, get_request_id
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("honeypot-api")
 
-# Non-blocking API key header (used for swagger + Security injection)
+# Non-blocking API key header
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
 app = FastAPI(
@@ -42,188 +40,136 @@ app = FastAPI(
 )
 
 # -----------------------------------------------------------------------------
-# CORS (CRITICAL for GUVI browser-based tester)
+# CORS
 # -----------------------------------------------------------------------------
-# The GUVI tester page runs on hackathon.guvi.in and calls your API via fetch().
-# Without CORS headers, the browser blocks the request BEFORE it reaches your server.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # hackathon-safe; tighten later if needed
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],          # required for x-api-key
+    allow_headers=["*"],
 )
 
-# Request ID middleware (your existing middleware)
 app.add_middleware(RequestIDMiddleware)
 
+# -----------------------------------------------------------------------------
+# DETERMINISTIC RESPONSE HELPER
+# -----------------------------------------------------------------------------
+def ok(reply: str) -> JSONResponse:
+    """
+    Authorized SINGLE response path.
+    Guarantees strict {"status": "success", "reply": "..."} format.
+    """
+    # Defensive check: ensure reply is a non-empty string
+    if not isinstance(reply, str) or not reply.strip():
+        # Fallback to agent's fallback
+        try:
+            reply = agent._fallback_reply()
+        except:
+            reply = "Okay."
+        
+        # Fallback of last resort
+        if not isinstance(reply, str) or not reply.strip():
+            reply = "Okay."
+
+    return JSONResponse(
+        status_code=200,
+        content={"status": "success", "reply": reply.strip()},
+        media_type="application/json",
+    )
 
 # -----------------------------------------------------------------------------
-# Helpers
+# HELPERS
 # -----------------------------------------------------------------------------
 def _normalize_timestamp(ts: Any) -> datetime:
     now = datetime.now(timezone.utc)
     try:
         if isinstance(ts, datetime):
-            # ensure tz-aware
             return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-
         if isinstance(ts, (int, float)):
-            # epoch ms vs seconds
-            if ts > 10_000_000_000:  # ms
+            if ts > 10_000_000_000:
                 return datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
             return datetime.fromtimestamp(ts, tz=timezone.utc)
-
         if isinstance(ts, str) and ts.strip():
-            # ISO string; accept 'Z'
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except Exception:
         return now
     return now
 
-
 def _empty_intel() -> Dict[str, List[str]]:
     return {
-        "bankAccounts": [],
-        "upiIds": [],
-        "phishingLinks": [],
-        "phoneNumbers": [],
-        "suspiciousKeywords": [],
+        "bankAccounts": [], "upiIds": [], "phishingLinks": [],
+        "phoneNumbers": [], "suspiciousKeywords": [],
     }
-
 
 def _ensure_session(session_id: str, now: datetime) -> Dict[str, Any]:
     session = store.get_session(session_id)
-    if session:
-        # ensure keys exist
-        session.setdefault("started_at", now.isoformat())
-        session.setdefault("totalMessagesExchanged", 0)
-        session.setdefault("scamDetected", False)
-        session.setdefault("callback_sent", False)
-        session.setdefault("callback_attempts", 0)
-        session.setdefault("callback_in_progress", False)
-        session.setdefault("next_retry_at", None)
-        session.setdefault("extractedIntelligence", _empty_intel())
-        session.setdefault("internalHistory", [])
-        session.setdefault("agentNotes", "")
-        session.setdefault("last_agent_reply", "")
-        return session
-
-    return {
-        "started_at": now.isoformat(),
-        "totalMessagesExchanged": 0,
-        "scamDetected": False,
-        "callback_sent": False,
-        "callback_attempts": 0,
-        "callback_in_progress": False,
-        "next_retry_at": None,
-        "extractedIntelligence": _empty_intel(),
-        "internalHistory": [],
-        "agentNotes": "",
-        "last_agent_reply": "",
-    }
-
+    if not session:
+        session = {
+            "started_at": now.isoformat(),
+            "totalMessagesExchanged": 0,
+            "scamDetected": False,
+            "callback_sent": False,
+            "callback_attempts": 0,
+            "callback_in_progress": False,
+            "next_retry_at": None,
+            "extractedIntelligence": _empty_intel(),
+            "internalHistory": [],
+            "agentNotes": "",
+            "last_agent_reply": "",
+        }
+    return session
 
 # -----------------------------------------------------------------------------
-# Exception handlers (ALWAYS return HTTP 200 + full SuccessResponse schema)
+# GLOBAL EXCEPTION HANDLERS (ALL RETURN 200 OK)
 # -----------------------------------------------------------------------------
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    rid = get_request_id()
-    logger.error(f"[{rid}] Global exception: {type(exc).__name__}: {exc}", exc_info=True)
-    resp = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="I am having some technical trouble. Can we talk in a moment?",
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+    logger.error(f"Global exception: {exc}", exc_info=True)
+    return ok("I am having technical trouble. Please wait.")
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    rid = get_request_id()
-    logger.error(f"[{rid}] HTTP exception {exc.status_code}: {exc.detail}", exc_info=True)
-    resp = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="I'm not sure how to respond to that. Could you clarify?",
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+    logger.error(f"HTTP {exc.status_code} {request.method} {request.url.path}")
+    return ok("Please resend.")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    rid = get_request_id()
-    logger.error(f"[{rid}] Validation error: {exc.errors()}", exc_info=True)
-    resp = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="Something seems wrong with the message format. Please resend.",
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+    logger.error(f"Validation error: {exc}")
+    return ok("Message format error.")
 
 @app.exception_handler(json.JSONDecodeError)
 async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
-    rid = get_request_id()
-    logger.error(f"[{rid}] JSON decode error: {exc}", exc_info=True)
-    resp = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="I couldn't read that message. Please try sending it again.",
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+    logger.error(f"JSON decode error: {exc}")
+    # Be robust: user message might just have bad chars
+    return ok("I couldn't read that message. Please try sending it again.")
 
 # -----------------------------------------------------------------------------
-# Basic routes
+# PROBE ROUTE HANDLERS
 # -----------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "honeypot", "endpoint": "/api/honeypot"}
+    return ok("System online.")
 
-
-# /__debug_echo removed per GUVI final instructions
-
-
-# Probe-friendly endpoints (some testers probe with GET/OPTIONS/HEAD)
 @app.get("/api/honeypot")
 @app.get("/api/honeypot/")
-async def honeypot_probe_get():
-    resp = build_success_response(
-        scam_detected=False,
-        engagement_duration=0,
-        total_messages=0,
-        extracted_intel=None,
-        agent_reply="Use POST with JSON body.",
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+async def honeypot_get():
+    return ok("Use POST.")
 
 @app.options("/api/honeypot")
 @app.options("/api/honeypot/")
-async def honeypot_probe_options():
-    return Response(status_code=200)
-
+async def honeypot_options():
+    return ok("Allowed: POST, OPTIONS, HEAD, GET.")
 
 @app.head("/api/honeypot")
 @app.head("/api/honeypot/")
 @app.head("/")
-async def honeypot_probe_head():
-    return Response(status_code=200)
-
+async def honeypot_head():
+    return ok("OK")
 
 # -----------------------------------------------------------------------------
-# Core handler (manual JSON parse + normalization + always SuccessResponse)
+# CORE LOGIC
 # -----------------------------------------------------------------------------
 async def _handle_honeypot(
     request: Request,
@@ -232,49 +178,27 @@ async def _handle_honeypot(
 ) -> JSONResponse:
     rid = get_request_id()
 
-    # -------------------------
-    # Manual parse (never throw)
-    # -------------------------
-    payload: Dict[str, Any] = {}
-    raw = None
+    # 1. Parse JSON manually
+    payload = {}
     try:
         raw = await request.body()
         if raw:
             payload = json.loads(raw)
-        else:
-            payload = {}
     except Exception as e:
-        logger.warning(f"[{rid}] Body parse failed: {type(e).__name__}: {e}")
-        # DEBUG: Log raw body if parse fails
-        try:
-             logger.debug(f"[{rid}] RAW BODY: {raw[:500] if raw else 'None'}")
-        except:
-             pass
-        payload = {}
+        logger.warning(f"[{rid}] Parse failed: {e}")
+        # Log raw for debugging if needed (middleware handles this too)
+        return ok("Invalid JSON.")
 
     if not isinstance(payload, dict):
-        logger.warning(f"[{rid}] Payload not dict: {type(payload)}")
-        payload = {}
+        return ok("Invalid payload.")
 
-    # -------------------------
-    # Auth (non-blocking)
-    # -------------------------
+    # 2. Auth
     api_key = x_api_key or request.headers.get("x-api-key")
     if not api_key or api_key != settings.HONEYPOT_API_KEY:
-        resp = build_success_response(
-            scam_detected=False,
-            engagement_duration=0,
-            total_messages=0,
-            extracted_intel=None,
-            agent_reply="Missing or invalid API key.",
-        )
-        return JSONResponse(status_code=200, content=resp)
+        return ok("Missing or invalid API key.")
 
-    # -------------------------
-    # Normalize fields (GUVI can send epoch ms)
-    # -------------------------
+    # 3. Normalize
     now = datetime.now(timezone.utc)
-
     session_id = payload.get("sessionId")
     if not isinstance(session_id, str) or not session_id.strip():
         session_id = f"session-{rid[:8]}"
@@ -282,188 +206,134 @@ async def _handle_honeypot(
     msg_obj = payload.get("message", {})
     if not isinstance(msg_obj, dict):
         msg_obj = {}
-
+    
     incoming_text = str(msg_obj.get("text", "") or "")[:4000]
     incoming_ts = _normalize_timestamp(msg_obj.get("timestamp"))
 
     conv_raw = payload.get("conversationHistory", [])
     if not isinstance(conv_raw, list):
         conv_raw = []
-    conv_raw = conv_raw[:30]
-
+    
     normalized_history: List[Message] = []
-    for m in conv_raw:
-        if not isinstance(m, dict):
-            continue
+    for m in conv_raw[:30]:
+        if not isinstance(m, dict): continue
         try:
-            t = str(m.get("text", "") or "")[:1000]
+            t = str(m.get("text",""))[:1000]
             s = m.get("sender", "scammer")
             ts = _normalize_timestamp(m.get("timestamp"))
-            if s not in ["scammer", "user"]:
-                s = "scammer"
+            if s not in ["scammer", "user"]: s = "scammer"
             normalized_history.append(Message(sender=Sender(s), text=t, timestamp=ts))
-        except Exception:
-            continue
+        except: continue
 
-    # -------------------------
-    # Session state
-    # -------------------------
+    # 4. Session & Storage
     session = _ensure_session(session_id, now)
-
-    session["internalHistory"].append(
-        {"sender": "scammer", "text": incoming_text, "timestamp": incoming_ts.isoformat()}
-    )
-    session["totalMessagesExchanged"] += 1
+    session["internalHistory"].append({
+        "sender": "scammer",
+        "text": incoming_text,
+        "timestamp": incoming_ts.isoformat()
+    })
+    session["totalMessagesExchanged"] = session.get("totalMessagesExchanged", 0) + 1
     store.save_session(session_id, session)
 
-    # combined history for detection + agent
     combined_history = store.get_combined_history(session_id, normalized_history)
-    history_text = "\n".join([m.text for m in combined_history]) if combined_history else ""
+    history_text = "\n".join([m.text for m in combined_history])
 
-    # -------------------------
-    # Extraction (always on incoming text + history)
-    # -------------------------
-    current_intel = session.get("extractedIntelligence") or _empty_intel()
-
+    # 5. Extraction
+    current_intel = session["extractedIntelligence"]
     try:
         new_intel = extractor.extract_from_text(incoming_text)
-        if combined_history:
-            hist_intel = extractor.extract_from_messages(combined_history)
-            for k in new_intel:
-                new_intel[k] = list(set(new_intel[k] + hist_intel.get(k, [])))
+        # Simplified merge logic
+        for k, v in new_intel.items():
+            current_intel[k] = list(set(current_intel.get(k, []) + v))
+        session["extractedIntelligence"] = current_intel
     except Exception as e:
-        logger.error(f"[{rid}] Extraction failed: {e}", exc_info=True)
-        new_intel = {"upi": [], "bank": [], "links": [], "phones": [], "keywords": []}
+        logger.error(f"Extraction error: {e}")
 
-    ext_key_map = {
-        "upiIds": "upi",
-        "bankAccounts": "bank",
-        "phishingLinks": "links",
-        "phoneNumbers": "phones",
-        "suspiciousKeywords": "keywords",
-    }
-
-    for out_key, src_key in ext_key_map.items():
-        existing = set(current_intel.get(out_key, []))
-        incoming = set(new_intel.get(src_key, []))
-        current_intel[out_key] = list(existing.union(incoming))
-
-    session["extractedIntelligence"] = current_intel
-
-    # -------------------------
-    # Scam detection
-    # -------------------------
+    # 6. Scam Detection
     if not session.get("scamDetected", False):
         try:
-            is_scam, confidence = await detector.check_scam(
-                message_text=incoming_text,
-                history_text=history_text,
-            )
+            is_scam, confidence = await detector.check_scam(incoming_text, history_text)
             if is_scam:
                 session["scamDetected"] = True
-                logger.info(f"[{rid}] Scam detected (conf={confidence})")
         except Exception as e:
-            logger.error(f"[{rid}] Scam detection failed: {e}", exc_info=True)
+            logger.error(f"Detection error: {e}")
 
-    # -------------------------
-    # Agent reply
-    # -------------------------
-    agent_reply_text = ""
+    # 7. Agent Reply
+    agent_reply_text = "Okay."
     if session.get("scamDetected", False):
         try:
+             # Calculate turn index
             scammer_msgs = len([m for m in combined_history if m.sender == Sender.SCAMMER])
             agent_msgs = len([m for m in combined_history if m.sender == Sender.USER])
-            logical_turns = min(scammer_msgs, agent_msgs + 1)
-
-            agent_reply_text = await safe_agent_reply(
-                current_message=incoming_text,
-                merged_history=combined_history,
-                intel_so_far=current_intel,
-                turn_index=logical_turns,
-                timeout_seconds=8.0,
+            turn_index = min(scammer_msgs, agent_msgs + 1)
+            
+            # Using agent directly
+            agent_reply_text = await agent.generate_reply(
+                incoming_text, combined_history, current_intel, turn_index
             )
-        except Exception:
+        except:
             agent_reply_text = agent._fallback_reply()
+    
+    if not agent_reply_text or not agent_reply_text.strip():
+        agent_reply_text = agent._fallback_reply()
 
-        session["internalHistory"].append(
-            {"sender": "user", "text": agent_reply_text, "timestamp": datetime.now(timezone.utc).isoformat()}
-        )
-        session["totalMessagesExchanged"] += 1
-        session["last_agent_reply"] = agent_reply_text
+    # Update session
+    session["internalHistory"].append({
+        "sender": "user", 
+        "text": agent_reply_text, 
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+    session["totalMessagesExchanged"] += 1
+    session["last_agent_reply"] = agent_reply_text
+    
+    # Summary for callback (NOT nextReply)
+    u_count = len(current_intel.get("upiIds", []))
+    b_count = len(current_intel.get("bankAccounts", []))
+    session["agentNotes"] = f"ScamDetected: {session['scamDetected']}. Msgs: {session['totalMessagesExchanged']}. UPI: {u_count}, Bank: {b_count}."
 
-        # Updated agentNotes to be a behavioral summary instead of 'nextReply'
-        s_detected = session.get("scamDetected", False)
-        t_msgs = session.get("totalMessagesExchanged", 0)
-        u_intel = len(current_intel.get("upiIds", []))
-        b_intel = len(current_intel.get("bankAccounts", []))
-        session["agentNotes"] = f"ScamDetected: {s_detected}. TotalMsgs: {t_msgs}. Extracted: Upi={u_intel}, Bank={b_intel}."
-
-    # -------------------------
-    # Callback scheduling (final result)
-    # -------------------------
-    can_retry = True
-    if session.get("next_retry_at"):
-        try:
-            next_retry = datetime.fromisoformat(session["next_retry_at"])
-            if next_retry.tzinfo is None:
-                next_retry = next_retry.replace(tzinfo=timezone.utc)
-            if now < next_retry:
-                can_retry = False
-        except Exception:
-            pass
-
-    if (
-        session.get("scamDetected", False)
-        and not session.get("callback_sent", False)
-        and not session.get("callback_in_progress", False)
-        and can_retry
-    ):
-        if check_completion(session, combined_history):
+    # 8. Callback Background Task
+    if session.get("scamDetected", False) and not session.get("callback_sent", False) and not session.get("callback_in_progress", False):
+        # Retry logic check...
+        can_retry = True
+        if session.get("next_retry_at"):
+            try:
+                next_retry = datetime.fromisoformat(session["next_retry_at"])
+                if next_retry.tzinfo is None:
+                    next_retry = next_retry.replace(tzinfo=timezone.utc)
+                if now < next_retry:
+                    can_retry = False
+            except: pass
+        
+        if can_retry and check_completion(session, combined_history):
             session["callback_in_progress"] = True
             store.save_session(session_id, session)
-
-            callback_payload = build_callback_payload(session_id, session)
-
-            async def background_callback_wrapper():
+            
+            payload = build_callback_payload(session_id, session)
+            async def bg_callback():
                 try:
-                    success, code, msg = await send_final_result_callback(callback_payload)
-                    s = store.get_session(session_id) or session
-                    s["callback_in_progress"] = False
-                    if success:
-                        s["callback_sent"] = True
-                    else:
-                        s["callback_attempts"] = s.get("callback_attempts", 0) + 1
-                        if s["callback_attempts"] >= 3:
-                            s["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-                    store.save_session(session_id, s)
+                    success, code, msg = await send_final_result_callback(payload)
+                    s = store.get_session(session_id)
+                    if s:
+                        s["callback_in_progress"] = False
+                        if success: s["callback_sent"] = True
+                        else: 
+                             s["callback_attempts"] = s.get("callback_attempts", 0) + 1
+                             s["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+                        store.save_session(session_id, s)
                 except Exception as e:
-                    logger.error(f"[{rid}] Callback failed: {e}", exc_info=True)
-                    s = store.get_session(session_id) or session
-                    s["callback_in_progress"] = False
-                    store.save_session(session_id, s)
+                     logger.error(f"Callback error: {e}")
+                     s = store.get_session(session_id)
+                     if s:
+                        s["callback_in_progress"] = False
+                        store.save_session(session_id, s)
 
-            background_tasks.add_task(background_callback_wrapper)
+            background_tasks.add_task(bg_callback)
 
-    # save session
     store.save_session(session_id, session)
-
-    # -------------------------
-    # Build final response (full SuccessResponse schema)
-    # -------------------------
-    duration = calculate_engagement_duration(session["started_at"])
-    resp = build_success_response(
-        scam_detected=bool(session.get("scamDetected", False)),
-        engagement_duration=int(duration),
-        total_messages=int(session.get("totalMessagesExchanged", 0)),
-        extracted_intel=session.get("extractedIntelligence", None),
-        agent_notes=session.get("agentNotes", ""),
-        agent_reply=agent_reply_text,
-    )
-    return JSONResponse(status_code=200, content=resp)
-
+    return ok(agent_reply_text)
 
 # -----------------------------------------------------------------------------
-# POST entrypoints (covers GUVI tester variations)
+# POST ENTRY POINTS
 # -----------------------------------------------------------------------------
 @app.post("/api/honeypot")
 @app.post("/api/honeypot/")
@@ -476,13 +346,5 @@ async def honeypot_entry(
     try:
         return await _handle_honeypot(request, background_tasks, x_api_key)
     except Exception as e:
-        rid = get_request_id()
-        logger.exception(f"[{rid}] CRITICAL honeypot_entry error: {e}")
-        resp = build_success_response(
-            scam_detected=False,
-            engagement_duration=0,
-            total_messages=0,
-            extracted_intel=None,
-            agent_reply=agent._fallback_reply(),
-        )
-        return JSONResponse(status_code=200, content=resp)
+        logger.error(f"Entry error: {e}")
+        return ok("System busy.")
