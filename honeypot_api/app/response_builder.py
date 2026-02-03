@@ -60,53 +60,19 @@ def build_success_response(
     extracted_intel: Optional[Dict[str, List[str]]] = None,
     agent_notes: str = "",
     agent_reply: str = ""
-) -> SuccessResponse:
+) -> Dict[str, Any]:
     """
-    Build guaranteed valid SuccessResponse.
-    Always returns proper schema with all required fields.
+    Build guaranteed valid simple response for GUVI.
+    Returns: {"status": "success", "reply": "..."}
     """
-    # Default empty intelligence
-    if extracted_intel is None:
-        extracted_intel = {
-            "bankAccounts": [],
-            "upiIds": [],
-            "phishingLinks": [],
-            "phoneNumbers": [],
-            "suspiciousKeywords": []
-        }
+    # Ensure agent_reply is safe
+    final_reply = agent_reply if agent_reply and agent_reply.strip() else agent._fallback_reply()
     
-    # Cap list sizes
-    capped_intel = {
-        "bankAccounts": cap_list(extracted_intel.get("bankAccounts", []), 20),
-        "upiIds": cap_list(extracted_intel.get("upiIds", []), 20),
-        "phishingLinks": cap_list(extracted_intel.get("phishingLinks", []), 20),
-        "phoneNumbers": cap_list(extracted_intel.get("phoneNumbers", []), 20),
-        "suspiciousKeywords": cap_list(extracted_intel.get("suspiciousKeywords", []), 50)
+    # Truncate if excessively long (security/stability)
+    if len(final_reply) > 1000:
+        final_reply = final_reply[:997] + "..."
+
+    return {
+        "status": "success",
+        "reply": final_reply.strip()
     }
-    
-    # Format agent notes - ALWAYS start with "nextReply: "
-    if agent_reply:
-        # Truncate reply if needed
-        if len(agent_reply) > 500:
-            agent_reply = agent_reply[:497] + "..."
-        formatted_notes = f"nextReply: {agent_reply}"
-    elif agent_notes:
-        # If notes provided but no reply, ensure format
-        if not agent_notes.startswith("nextReply:"):
-            formatted_notes = f"nextReply: {agent_notes}"
-        else:
-            formatted_notes = agent_notes
-    else:
-        # Default fallback
-        formatted_notes = f"nextReply: {agent._fallback_reply()}"
-    
-    return SuccessResponse(
-        status="success",
-        scamDetected=scam_detected,
-        engagementMetrics=EngagementMetrics(
-            engagementDurationSeconds=max(0, engagement_duration),
-            totalMessagesExchanged=max(0, total_messages)
-        ),
-        extractedIntelligence=ExtractedIntelligence(**capped_intel),
-        agentNotes=formatted_notes
-    )

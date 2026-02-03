@@ -1,6 +1,6 @@
 """
-Test GUVI-compatible SuccessResponse format and hardening.
-Verifies API returns full structured schema as expected by GUVI evaluation.
+Test GUVI-compatible SimpleResponse format and hardening.
+Verifies API returns exactly {"status": "success", "reply": "..."}
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -9,10 +9,10 @@ from app.config import settings
 
 client = TestClient(app)
 
-def test_full_success_response_format():
-    """Test that POST /api/honeypot returns full SuccessResponse schema."""
+def test_simple_success_response_format():
+    """Test that POST /api/honeypot returns ONLY status and reply."""
     payload = {
-        "sessionId": "guvi-full-test-001",
+        "sessionId": "guvi-simple-test-001",
         "message": {
             "sender": "scammer",
             "text": "Your bank account will be blocked. Verify immediately.",
@@ -32,18 +32,17 @@ def test_full_success_response_format():
     
     data = response.json()
     
-    # GUVI Evaluation expects the full schema
-    required_keys = {"status", "scamDetected", "engagementMetrics", "extractedIntelligence", "agentNotes"}
-    assert all(k in data for k in required_keys)
-    
-    # Status should be "success"
+    # GUVI Final Requirement: ONLY status and reply
+    assert "status" in data
+    assert "reply" in data
     assert data["status"] == "success"
     
-    # agentNotes should start with nextReply:
-    assert data["agentNotes"].startswith("nextReply:")
+    # Ensure no extra fields leaked
+    assert "scamDetected" not in data
+    assert "extractedIntelligence" not in data
+    assert "agentNotes" not in data
     
-    print(f"[PASS] Full SuccessResponse format correct")
-    print(f"   agentNotes: {data['agentNotes'][:100]}...")
+    print(f"[PASS] SimpleResponse format correct: {data}")
 
 def test_malformed_json_returns_success_response():
     """Test that malformed JSON body returns SuccessResponse instead of 400."""
@@ -59,8 +58,7 @@ def test_malformed_json_returns_success_response():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
-    assert "agentNotes" in data
-    assert data["agentNotes"].startswith("nextReply:")
+    assert "reply" in data
     
     print("[PASS] Malformed JSON returns SuccessResponse")
 
@@ -91,7 +89,7 @@ def test_epoch_timestamp_normalization():
     print("[PASS] Epoch timestamps normalized safely")
 
 def test_auth_failure_returns_success_schema():
-    """Test that auth failures return 200 with SuccessResponse schema."""
+    """Test that auth failures return 200 with SimpleResponse schema."""
     response = client.post(
         "/api/honeypot",
         json={},
@@ -101,10 +99,30 @@ def test_auth_failure_returns_success_schema():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
-    assert "agentNotes" in data
-    assert data["agentNotes"].startswith("nextReply:")
+    assert "reply" in data
+    # Fallback reply for auth failure
+    assert data["reply"] == "Missing or invalid API key."
     
-    print("[PASS] Auth failure returns valid SuccessResponse schema")
+    print("[PASS] Auth failure returns valid SimpleResponse schema")
+
+def test_options_cors_preflight():
+    """Test that OPTIONS method is allowed and returns 200 (CORS)."""
+    response = client.options("/api/honeypot")
+    assert response.status_code == 200
+    print("[PASS] OPTIONS /api/honeypot returns 200")
+
+def test_debug_endpoint_removed():
+    """Test that debug endpoint is handled by global 404 handler (returning 200)."""
+    response = client.post("/__debug_echo", json={})
+    
+    # Because of global exception handler catching 404, we expect 200
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    # Fallback reply
+    assert "reply" in data
+    
+    print("[PASS] /__debug_echo handled via global 404 fallback")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

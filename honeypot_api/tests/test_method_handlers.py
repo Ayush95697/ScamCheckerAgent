@@ -9,53 +9,34 @@ from app.main import app
 client = TestClient(app)
 
 def test_get_honeypot_returns_200():
-    """Test that GET /api/honeypot returns HTTP 200 with SuccessResponse."""
+    """Test that GET /api/honeypot returns HTTP 200 with SimpleResponse."""
     response = client.get("/api/honeypot")
     
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
     
     data = response.json()
     
-    # Verify SuccessResponse schema
+    # Verify SimpleResponse schema
     assert data["status"] == "success"
-    assert data["scamDetected"] == False
-    assert data["engagementMetrics"]["engagementDurationSeconds"] == 0
-    assert data["engagementMetrics"]["totalMessagesExchanged"] == 0
+    assert "reply" in data
+    assert data["reply"] == "Use POST with JSON body."
     
-    # Verify intelligence fields are empty
-    intel = data["extractedIntelligence"]
-    assert intel["bankAccounts"] == []
-    assert intel["upiIds"] == []
-    assert intel["phishingLinks"] == []
-    assert intel["phoneNumbers"] == []
-    assert intel["suspiciousKeywords"] == []
+    # Verify no extra fields
+    assert "scamDetected" not in data
+    assert "agentNotes" not in data
     
-    # Verify agentNotes format
-    assert "agentNotes" in data
-    assert data["agentNotes"].startswith("nextReply:"), \
-        f"agentNotes should start with 'nextReply:', got: {data['agentNotes']}"
-    assert "POST" in data["agentNotes"] or "post" in data["agentNotes"].lower()
-    
-    print("[PASS] GET /api/honeypot returns HTTP 200 with SuccessResponse")
+    print("[PASS] GET /api/honeypot returns HTTP 200 with SimpleResponse")
 
 def test_options_honeypot_returns_200():
-    """Test that OPTIONS /api/honeypot returns HTTP 200."""
+    """Test that OPTIONS /api/honeypot returns HTTP 200 (Empty body)."""
     response = client.options("/api/honeypot")
     
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
     
-    data = response.json()
+    # OPTIONS has no body in our implementation
+    assert response.content == b""
     
-    # Verify SuccessResponse schema
-    assert data["status"] == "success"
-    assert data["scamDetected"] == False
-    
-    # Verify agentNotes format
-    assert "agentNotes" in data
-    assert data["agentNotes"].startswith("nextReply:"), \
-        f"agentNotes should start with 'nextReply:', got: {data['agentNotes']}"
-    
-    print("[PASS] OPTIONS /api/honeypot returns HTTP 200 with SuccessResponse")
+    print("[PASS] OPTIONS /api/honeypot returns HTTP 200 (Empty body)")
 
 def test_post_still_works():
     """Test that POST /api/honeypot still works after adding GET/OPTIONS."""
@@ -82,10 +63,7 @@ def test_post_still_works():
     
     data = response.json()
     assert data["status"] == "success"
-    
-    # Verify agentNotes format
-    assert data["agentNotes"].startswith("nextReply:"), \
-        f"POST agentNotes should start with 'nextReply:', got: {data['agentNotes']}"
+    assert "reply" in data
     
     print("[PASS] POST /api/honeypot still works correctly")
 
@@ -105,42 +83,29 @@ def test_browser_simulation():
     
     data = response.json()
     assert data["status"] == "success"
+    assert "reply" in data
     
     print("[PASS] Browser simulation - GET returns 200 (not 405)")
 
-def test_all_methods_return_same_schema():
-    """Verify GET, OPTIONS, and POST all return SuccessResponse schema."""
+def test_all_methods_return_consistent_behavior():
+    """Verify consistency across methods."""
     from app.config import settings
     
     # GET
     get_response = client.get("/api/honeypot")
     get_data = get_response.json()
+    assert get_data["status"] == "success"
     
-    # OPTIONS
-    options_response = client.options("/api/honeypot")
-    options_data = options_response.json()
-    
-    # POST (empty body)
+    # POST
     post_response = client.post(
         "/api/honeypot",
         json={},
         headers={"x-api-key": settings.HONEYPOT_API_KEY}
     )
     post_data = post_response.json()
+    assert post_data["status"] == "success"
     
-    # All should have same top-level keys
-    expected_keys = {"status", "scamDetected", "engagementMetrics", "extractedIntelligence", "agentNotes"}
-    
-    assert set(get_data.keys()) == expected_keys
-    assert set(options_data.keys()) == expected_keys
-    assert set(post_data.keys()) == expected_keys
-    
-    # All should have agentNotes starting with nextReply:
-    assert get_data["agentNotes"].startswith("nextReply:")
-    assert options_data["agentNotes"].startswith("nextReply:")
-    assert post_data["agentNotes"].startswith("nextReply:")
-    
-    print("[PASS] All methods return consistent SuccessResponse schema")
+    print("[PASS] All methods consistent")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

@@ -139,7 +139,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         extracted_intel=None,
         agent_reply="I am having some technical trouble. Can we talk in a moment?",
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -153,7 +153,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         extracted_intel=None,
         agent_reply="I'm not sure how to respond to that. Could you clarify?",
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 @app.exception_handler(RequestValidationError)
@@ -167,7 +167,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         extracted_intel=None,
         agent_reply="Something seems wrong with the message format. Please resend.",
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 @app.exception_handler(json.JSONDecodeError)
@@ -181,7 +181,7 @@ async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError)
         extracted_intel=None,
         agent_reply="I couldn't read that message. Please try sending it again.",
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 # -----------------------------------------------------------------------------
@@ -192,28 +192,7 @@ def root():
     return {"status": "ok", "service": "honeypot", "endpoint": "/api/honeypot"}
 
 
-@app.post("/__debug_echo")
-async def debug_echo(request: Request):
-    """
-    Debug endpoint to confirm what GUVI is sending.
-    You should see OPTIONS + POST in Network tab after CORS is enabled.
-    """
-    try:
-        raw = await request.body()
-        raw_str = raw.decode("utf-8", "ignore") if raw else ""
-    except Exception:
-        raw_str = ""
-    return {
-        "content_type": request.headers.get("content-type", "missing"),
-        "origin": request.headers.get("origin", "missing"),
-        "raw_len": len(raw_str),
-        "raw_preview": raw_str[:200] if raw_str else "empty",
-        "headers_subset": {
-            "origin": request.headers.get("origin"),
-            "content-type": request.headers.get("content-type"),
-            "x-api-key": "present" if request.headers.get("x-api-key") else "missing",
-        },
-    }
+# /__debug_echo removed per GUVI final instructions
 
 
 # Probe-friendly endpoints (some testers probe with GET/OPTIONS/HEAD)
@@ -227,7 +206,7 @@ async def honeypot_probe_get():
         extracted_intel=None,
         agent_reply="Use POST with JSON body.",
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 @app.options("/api/honeypot")
@@ -283,7 +262,7 @@ async def _handle_honeypot(
             extracted_intel=None,
             agent_reply="Missing or invalid API key.",
         )
-        return JSONResponse(status_code=200, content=resp.model_dump())
+        return JSONResponse(status_code=200, content=resp)
 
     # -------------------------
     # Normalize fields (GUVI can send epoch ms)
@@ -406,8 +385,12 @@ async def _handle_honeypot(
         session["totalMessagesExchanged"] += 1
         session["last_agent_reply"] = agent_reply_text
 
-        # STRICT formatting requirement
-        session["agentNotes"] = f"nextReply: {agent_reply_text}"
+        # Updated agentNotes to be a behavioral summary instead of 'nextReply'
+        s_detected = session.get("scamDetected", False)
+        t_msgs = session.get("totalMessagesExchanged", 0)
+        u_intel = len(current_intel.get("upiIds", []))
+        b_intel = len(current_intel.get("bankAccounts", []))
+        session["agentNotes"] = f"ScamDetected: {s_detected}. TotalMsgs: {t_msgs}. Extracted: Upi={u_intel}, Bank={b_intel}."
 
     # -------------------------
     # Callback scheduling (final result)
@@ -467,10 +450,10 @@ async def _handle_honeypot(
         engagement_duration=int(duration),
         total_messages=int(session.get("totalMessagesExchanged", 0)),
         extracted_intel=session.get("extractedIntelligence", None),
-        agent_notes=session.get("agentNotes", ""),  # must start with nextReply:
+        agent_notes=session.get("agentNotes", ""),
         agent_reply=agent_reply_text,
     )
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    return JSONResponse(status_code=200, content=resp)
 
 
 # -----------------------------------------------------------------------------
@@ -496,4 +479,4 @@ async def honeypot_entry(
             extracted_intel=None,
             agent_reply=agent._fallback_reply(),
         )
-        return JSONResponse(status_code=200, content=resp.model_dump())
+        return JSONResponse(status_code=200, content=resp)
