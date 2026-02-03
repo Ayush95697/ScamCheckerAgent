@@ -236,6 +236,7 @@ async def _handle_honeypot(
     # Manual parse (never throw)
     # -------------------------
     payload: Dict[str, Any] = {}
+    raw = None
     try:
         raw = await request.body()
         if raw:
@@ -244,6 +245,11 @@ async def _handle_honeypot(
             payload = {}
     except Exception as e:
         logger.warning(f"[{rid}] Body parse failed: {type(e).__name__}: {e}")
+        # DEBUG: Log raw body if parse fails
+        try:
+             logger.debug(f"[{rid}] RAW BODY: {raw[:500] if raw else 'None'}")
+        except:
+             pass
         payload = {}
 
     if not isinstance(payload, dict):
