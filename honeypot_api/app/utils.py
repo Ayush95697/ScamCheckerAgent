@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from app.models import ExtractedIntelligence, CallbackPayload, EngagementMetrics
 
@@ -18,7 +18,16 @@ def calculate_engagement_duration(started_at: Any) -> int:
     else:
         return 0
     
-    now = datetime.now()
+    # Ensure start_time is aware (UTC)
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+        
+    now = datetime.now(timezone.utc)
+    
+    # Only subtract if start_time is valid
+    if start_time > now:
+        return 0
+        
     return int((now - start_time).total_seconds())
 
 def is_intel_found(extracted: Dict[str, List[str]], high_value_only: bool = False) -> bool:
